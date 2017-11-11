@@ -10,6 +10,8 @@ pub mod pwm;
 pub mod constants;
 
 use std::string::String;
+use std::os::raw::c_void;
+use std::mem;
 
 use constants::*;
 
@@ -31,6 +33,13 @@ pub const OFF: Level = Level::OFF;
 pub type GpioResult = Result<(), String>;
 pub type GpioResponse = Result<u32, String>;
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct Sample {
+    tick: u32,
+    level: u32,
+}
+
 #[link(name = "pigpio", kind = "dylib")]
 extern "C" {
     fn gpioInitialise() -> i32;
@@ -49,7 +58,16 @@ extern "C" {
 
     fn gpioTrigger(user_gpio: u32, pulseLen: u32, level: u32) -> i32; //
     fn gpioSetWatchdog(user_gpio: u32, timeout: u32) -> i32; //
+
+    fn gpioSetGetSamplesFuncEx(get_samples_func: extern fn(*const Sample, i32, *mut c_void), bits: u32, userdata: *mut c_void) -> i32;
 }
+
+extern "C" fn get_samples_func(samples: *const Sample, numSamples: i32, userdata: *mut c_void) {
+   let samples = unsafe { std::slice::from_raw_parts(samples, numSamples as usize) };
+   let closure: &mut Box<FnMut(&[Sample])> = unsafe { mem::transmute(userdata) };
+   closure(samples);
+}
+
 
 #[derive(Debug)]
 pub struct Pigpio {
@@ -129,5 +147,16 @@ impl Pigpio {
     /// Delays for at least the number of microseconds specified by microseconds.
     pub fn delay(&self, microseconds: u32) -> u32 {
         unsafe { gpioDelay(microseconds) }
+    }
+
+    pub fn set_get_samples_func<F>(&self, get_samples: F, bits: u32) -> GpioResult
+        where F: FnMut(&[Sample]),
+              F: 'static
+    {
+        let cb: Box<Box<FnMut(&[Sample])>> = Box::new(Box::new(get_samples));
+        match unsafe { gpioSetGetSamplesFuncEx(get_samples_func, bits, Box::into_raw(cb) as *mut _) } {
+            OK => Ok(()),
+            _ => Err(DEFAULT_ERROR.to_string()),
+        }
     }
 }
